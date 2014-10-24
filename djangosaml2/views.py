@@ -141,7 +141,8 @@ def login(request,
 def assertion_consumer_service(request,
                                config_loader_path=None,
                                attribute_mapping=None,
-                               create_unknown_user=None):
+                               create_unknown_user=None,
+                               username_source='attributes'):
     """SAML Authorization Response endpoint
 
     The IdP will send its response to this view, which
@@ -188,7 +189,8 @@ def assertion_consumer_service(request,
     logger.debug('Trying to authenticate the user')
     user = auth.authenticate(session_info=session_info,
                              attribute_mapping=attribute_mapping,
-                             create_unknown_user=create_unknown_user)
+                             create_unknown_user=create_unknown_user,
+                             username_source=username_source)
     if user is None:
         logger.error('The user is None')
         return HttpResponseForbidden("Permission denied")
