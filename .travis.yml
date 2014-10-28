@@ -1,0 +1,7 @@
+language: python
+
+install:
+  - pip install Django==1.5
+
+script:
+  - PYTHONPATH=. ./tests/run_tests.py
