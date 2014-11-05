@@ -41,6 +41,7 @@ except ImportError:
 from saml2 import BINDING_HTTP_REDIRECT, BINDING_HTTP_POST
 from saml2.client import Saml2Client
 from saml2.metadata import entity_descriptor
+from saml2.ident import code, decode
 
 from djangosaml2.cache import IdentityCache, OutstandingQueriesCache
 from djangosaml2.cache import StateCache
@@ -53,12 +54,12 @@ logger = logging.getLogger('djangosaml2')
 
 
 def _set_subject_id(session, subject_id):
-    session['_saml2_subject_id'] = subject_id
+    session['_saml2_subject_id'] = code(subject_id)
 
 
 def _get_subject_id(session):
     try:
-        return session['_saml2_subject_id']
+        return decode(session['_saml2_subject_id'])
     except KeyError:
         return None
 
@@ -256,16 +257,36 @@ def logout(request, config_loader_path=None):
         logger.error('Sorry, I do not know how to logout from several sources. I will logout just from the first one')
 
     for entityid, logout_info in result.items():
-        binding, http_info = logout_info
-        if binding == BINDING_HTTP_REDIRECT:
-            logger.debug('Redirecting to the IdP to continue the logout process')
-            return HttpResponseRedirect(get_location(http_info))
+        if isinstance(logout_info, tuple):
+            binding, http_info = logout_info
+            if binding == BINDING_HTTP_POST:
+                logger.debug('Returning form to the IdP to continue the logout process')
+                body = ''.join(http_info['data'])
+                return HttpResponse(body)
+            elif binding == BINDING_HTTP_REDIRECT:
+                logger.debug('Redirecting to the IdP to continue the logout process')
+                return HttpResponseRedirect(get_location(http_info))
+            else:
+                logger.error('Unknown binding: %s', binding)
+                return HttpResponseServerError('Failed to log out')
+        else:
+            # We must have had a soap logout
+            return finish_logout(request, logout_info)
 
     logger.error('Could not logout because there only the HTTP_REDIRECT is supported')
     return HttpResponseServerError('Logout Binding not supported')
 
 
-def logout_service(request, config_loader_path=None, next_page=None,
+def logout_service_redirect(request, *args, **kwargs):
+    return logout_service(request, request.GET, BINDING_HTTP_REDIRECT, *args, **kwargs)
+
+
+@csrf_exempt
+def logout_service_post(request, *args, **kwargs):
+    return logout_service(request, request.POST, BINDING_HTTP_POST, *args, **kwargs)
+
+
+def logout_service(request, data, binding, config_loader_path=None, next_page=None,
                    logout_error_template='djangosaml2/logout_error.html'):
     """SAML Logout Response endpoint
 
@@ -283,22 +304,13 @@ def logout_service(request, config_loader_path=None, next_page=None,
     client = Saml2Client(conf, state_cache=state,
                          identity_cache=IdentityCache(request.session))
 
-    if 'SAMLResponse' in request.GET:  # we started the logout
+    if 'SAMLResponse' in data:  # we started the logout
         logger.debug('Receiving a logout response from the IdP')
-        response = client.parse_logout_request_response(request.GET['SAMLResponse'],
-                                                        BINDING_HTTP_REDIRECT)
+        response = client.parse_logout_request_response(data['SAMLResponse'], binding)
         state.sync()
-        if response and response.status_ok():
-            if next_page is None and hasattr(settings, 'LOGOUT_REDIRECT_URL'):
-                next_page = settings.LOGOUT_REDIRECT_URL
-            logger.debug('Performing django_logout with a next_page of %s'
-                         % next_page)
-            return django_logout(request, next_page=next_page)
-        else:
-            logger.error('Unknown error during the logout')
-            return HttpResponse('Error during logout')
+        return finish_logout(request, response, next_page=next_page)
 
-    elif 'SAMLRequest' in request.GET:  # logout started by the IdP
+    elif 'SAMLRequest' in data:  # logout started by the IdP
         logger.debug('Receiving a logout request from the IdP')
         subject_id = _get_subject_id(request.session)
         if subject_id is None:
@@ -310,15 +322,27 @@ def logout_service(request, config_loader_path=None, next_page=None,
                                       context_instance=RequestContext(request))
         else:
             http_info = client.handle_logout_request(
-                request.GET['SAMLRequest'],
+                data['SAMLRequest'],
                 subject_id,
-                BINDING_HTTP_REDIRECT)
+                binding)
             state.sync()
             auth.logout(request)
             return HttpResponseRedirect(get_location(http_info))
     else:
         logger.error('No SAMLResponse or SAMLRequest parameter found')
         raise Http404('No SAMLResponse or SAMLRequest parameter found')
+
+
+def finish_logout(request, response, next_page=None):
+    if response and response.status_ok():
+        if next_page is None and hasattr(settings, 'LOGOUT_REDIRECT_URL'):
+            next_page = settings.LOGOUT_REDIRECT_URL
+        logger.debug('Performing django_logout with a next_page of %s'
+                     % next_page)
+        return django_logout(request, next_page=next_page)
+    else:
+        logger.error('Unknown error during the logout')
+        return HttpResponse('Error during logout')
 
 
 def metadata(request, config_loader_path=None, valid_for=None):
